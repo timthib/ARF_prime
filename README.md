@@ -1,6 +1,20 @@
 # ARF_prime
 
-Self-referential two-level research agent. The binding spec is [`methodology.md`](methodology.md). Choices already made are in [`report_experiment/`](report_experiment/README.md). The core, the agents, the monitor app, and the real vault are not built yet.
+Self-referential two-level research agent. The binding spec is [`methodology.md`](methodology.md). Choices already made are in [`report_experiment/`](report_experiment/README.md). The core, the agents, and the real vault are not built yet. The control room and the D0 room are local viewers over synthetic logs until those exist.
+
+## Open the rooms
+
+Two processes, two databases. Start each from the repo root, in its own terminal. Closing the browser does not stop a run.
+
+```bash
+python3 -m monitor
+python3 -m d0vault
+```
+
+- Control room: [http://127.0.0.1:8501](http://127.0.0.1:8501). Public, D1 only. It opens on the meta-run in progress.
+- D0 room: [http://127.0.0.1:8502](http://127.0.0.1:8502). You only, loopback only. The first start prints a password once in that terminal and does not write it into the tree. Keep it yourself. A later start does not print it again, and L0 and L1 must not see it.
+
+Trigger buttons stay disabled until the core command they call exists.
 
 ## Data
 
@@ -16,10 +30,12 @@ configs/experiment.json        K = 20
 report_experiment/             decision log for the report
 data/splits/                   empty on purpose
 archive/control-path-smoke/    synthetic check, set aside
+monitor/                       control room, D1 only
+d0vault/                       D0 room, loopback only
 runs/                          local output, gitignored
 ```
 
-Later phases add `core/`, `level0/`, `level1/`, `monitor/`, `d0vault/`, `pilot/`, and `analysis/` as the spec's checklist reaches them.
+Later phases add `core/`, `level0/`, `level1/`, `pilot/`, and `analysis/` as the spec's checklist reaches them.
 
 ## Archived smoke test
 
