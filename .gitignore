@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.env
+.env.*
+
+# OS / editor
+.DS_Store
+
+# Run outputs. The smoke test writes only under runs/smoke/.
+runs/
+reports/
+
+# Databases and ledgers are produced locally and may hold scores.
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.db
+
+# Data never belongs in this checkout.
+# The real Jena file stays in the other repo. D0 is loaded by the user
+# into a vault this git tree does not contain. A later hash file
+# data/D0.sha256 is the only D0-related object that may be committed.
+data/raw/
+data/splits/*
+!data/splits/.gitkeep
+data/**/*.parquet
+data/**/*.csv
+data/**/*.tsv
+data/**/*.npy
+data/**/*.npz
+data/**/*.json
+
+# Vault products, wherever a local dry-run creates them.
+d0_results.sqlite
+d0_audit.jsonl
+**/fake_d0.json
