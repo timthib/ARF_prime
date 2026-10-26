@@ -40,7 +40,7 @@ def test_seed_noise_can_floor_the_gain():
 
 
 def test_rule_module_has_no_io():
-    source = Path("smoke/decide_k.py").read_text(encoding="utf-8")
+    source = Path(__file__).resolve().parents[1].joinpath("smoke", "decide_k.py").read_text(encoding="utf-8")
     assert "open(" not in source
     assert "sqlite" not in source
     assert "fake_d0" not in source

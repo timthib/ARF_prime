@@ -16,9 +16,28 @@ from smoke.leak import find_leaks
 from smoke.loop import run_loop
 from smoke.materialise import materialise
 
+PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+SMOKE_CONFIG = PACKAGE_ROOT / "configs" / "smoke.json"
+
+
+def _experiment_path() -> Path:
+    for candidate in Path(__file__).resolve().parents:
+        path = candidate / "configs" / "experiment.json"
+        if path.is_file() and (candidate / "methodology.md").is_file():
+            return path
+    raise FileNotFoundError("configs/experiment.json not found from the smoke package")
+
 
 def _load_config(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def load_experiment(path: Path | None = None) -> dict:
+    experiment = json.loads((path or _experiment_path()).read_text(encoding="utf-8"))
+    k = experiment["K"]
+    if experiment["K_min"] != k or experiment["K_max"] != k:
+        raise ValueError("K_min and K_max must equal K")
+    return experiment
 
 
 def execute(
@@ -27,9 +46,9 @@ def execute(
     steps: int,
     n: int,
     run_id: str | None = None,
-    config_path: Path = Path("configs/smoke.json"),
+    config_path: Path | None = None,
 ) -> dict:
-    config = _load_config(config_path)
+    config = _load_config(config_path or SMOKE_CONFIG)
     if steps < 1:
         raise ValueError("steps must be positive")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -66,6 +85,10 @@ def execute(
         decision = decide_k(summary["j_sel_median"], summary["sigma_seed"]).as_dict()
     summary["decision"] = decision
     summary["scorer"] = "not_run"
+    experiment = load_experiment()
+    summary["K"] = experiment["K"]
+    summary["K_min"] = experiment["K_min"]
+    summary["K_max"] = experiment["K_max"]
 
     report_path = run_dir / "public" / "smoke_report.json"
     summary["leak_check"] = "pending"
@@ -90,7 +113,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--n", type=int, default=70128)
     parser.add_argument("--root", type=Path, default=Path("runs/smoke"))
     parser.add_argument("--run-id", default=None)
-    parser.add_argument("--config", type=Path, default=Path("configs/smoke.json"))
+    parser.add_argument("--config", type=Path, default=None)
     args = parser.parse_args(argv)
     summary = execute(
         args.root,
@@ -106,9 +129,10 @@ def main(argv: list[str] | None = None) -> None:
         print("K rule not applied; it is defined on five fixture or measured points")
     else:
         print(
-            f"dry-run K={decision['k']}  budget_limited={decision['budget_limited']}  "
+            f"rule dry-run K={decision['k']}  budget_limited={decision['budget_limited']}  "
             f"({decision['reason']})"
         )
+    print(f"experiment K={summary['K']}  (K_min=K_max; the dry-run does not replace it)")
 
 
 if __name__ == "__main__":

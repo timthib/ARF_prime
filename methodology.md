@@ -10,10 +10,10 @@ Labels used throughout: **[ASSUMPTION]** is an unmeasured estimate that the pilo
 ## 0. How to read this document
 
 ### 0.1 One-paragraph summary
-Level 0 (L0) is an LLM meta-agent that builds, runs and rewrites Level 1 (L1), an AIDE-style ML research agent, for ONE problem at a time (Problem 1: Jena Climate temperature forecasting; further problems one by one). **The output of L0 is a framework (an elected L1 framework), not a model.** An immutable core owns data custody, evaluation, budget and access control. Data is split chronologically into D1_fit (first 65% of N, given to L0 and L1), D1_sel (next 15%; labels held by the core) and D0 (last 20%, in a vault, scored automatically by a privileged scorer, visible **only to the user**, never fed back). A 48 h gap separates each pair, so the usable sets sit slightly under those fractions (Section 3.2). D1 means D1_fit + gap + D1_sel. The quality of an L1 run is the anytime area under its best-so-far normalised D1_sel score (`J_sel`), median over 3 seeds. The number of meta-steps `K` is fixed by a **pilot** (about 5 meta-steps) and frozen in the pre-registration, then is a hard min and max. After the runs, **all** L1 frameworks are scored on D0 and a **ranking test** checks whether the `J_sel` ordering predicts the D0 ordering. **Phase 2** runs the elected framework alone, once, at budget κB with one fresh seed, giving one model `f_ideal`, observed once on D0.
+Level 0 (L0) is an LLM meta-agent that builds, runs and rewrites Level 1 (L1), an AIDE-style ML research agent, for ONE problem at a time (Problem 1: Jena Climate temperature forecasting; further problems one by one). **The output of L0 is a framework (an elected L1 framework), not a model.** An immutable core owns data custody, evaluation, budget and access control. Data is split chronologically into D1_fit (first 65% of N, given to L0 and L1), D1_sel (next 15%; labels held by the core) and D0 (last 20%, in a vault, scored automatically by a privileged scorer, visible **only to the user**, never fed back). A 48 h gap separates each pair, so the usable sets sit slightly under those fractions (Section 3.2). D1 means D1_fit + gap + D1_sel. The quality of an L1 run is the anytime area under its best-so-far normalised D1_sel score (`J_sel`), median over 3 seeds. The number of meta-steps is `K = 20` (`K_min = K_max = 20`), set by the user on 26 Oct 2026. A pilot of about 5 meta-steps still calibrates cost on D1 only and does not change K. After the freeze, K is a hard min and max. After the runs, **all** L1 frameworks are scored on D0 and a **ranking test** checks whether the `J_sel` ordering predicts the D0 ordering. **Phase 2** runs the elected framework alone, once, at budget κB with one fresh seed, giving one model `f_ideal`, observed once on D0.
 
 ### 0.2 Decisions added on top of v5 (binding)
-1. **K is no longer fixed at 10.** A pilot of about 5 meta-steps calibrates cost and measures how fast `J_sel` improves. K (likely 15–20) and `B_tot` are chosen from the pilot curve (D1 / `J_sel` only, never D0) and frozen before the main runs. After the freeze K is a hard min and hard max: no early stopping and no extension. A longer run is a new design version decided from D1 only (Sections 7, 9.4).
+1. **K = 20.** It is no longer fixed at 10. The Section 7.3 rule maps a pilot curve into 15–20; on 26 Oct 2026 the user set `K = K_hi = 20` before any measured curve (`configs/experiment.json`, `K_min = K_max = 20`). The pilot still calibrates cost and `B_step` from D1 / `J_sel` only, and it does not change K. Nothing about D0 enters. After the freeze K is a hard min and hard max: no early stopping and no extension. A longer run is a new design version decided from D1 only (Sections 7, 9.4).
 2. **The 5-fresh-seed re-evaluation of the elected framework is dropped.** It is replaced by the **ranking test** (Section 10.1) over all L1 frameworks, scored on D0.
 3. **Phase 2 stays:** elected framework alone, budget κB, one fresh seed, one model `f_ideal`, observed once on D0 (observation only).
 4. **D0:** automatic plots per meta-step for the user only. L0, L1, agents and automation never see D0 data, scores or plots. The vault design is that of `monitor_app_design.md` v3 (Section 9). The look-log and freeze/version-bump rules are kept.
@@ -23,7 +23,7 @@ Level 0 (L0) is an LLM meta-agent that builds, runs and rewrites Level 1 (L1), a
 
 ```mermaid
 flowchart TD
-  PILOT["PILOT: about 5 meta-steps, D1 only, D0 scorer OFF"] --> RULE["Decision rule: choose K, B_step, B_tot from the pilot J_sel curve"]
+  PILOT["PILOT: about 5 meta-steps, D1 only, D0 scorer OFF"] --> RULE["Calibrate B_step and B_tot; K is already 20"]
   RULE --> FREEZE["FREEZE: prereg.yaml, design_hash, git tag prereg-v1"]
   FREEZE --> LOOP
   subgraph LOOP["PHASE 1: main meta-run, exactly K steps, no early stop, no extension"]
@@ -87,7 +87,7 @@ Code identifiers are in backticks. "GPU-h" means GPU-hours as accounted by the c
 | `u_j` | L1's own validation score of candidate j (inside D1_fit) | L1 internal |
 | **C. Budgets, iterations, seeds** | | |
 | `B` | GPU budget of one L1 run (per seed) | 0.25 GPU-h [ASSUMPTION] |
-| `K` | number of meta-steps; hard min and hard max; chosen by pilot, then frozen | 15–20 expected [OPEN] |
+| `K` | number of meta-steps; hard min and hard max | 20 (`K_min = K_max`) |
 | `B_step` | budget of one meta-step (GPU-h plus tokens) | 3B = 0.75 GPU-h [ASSUMPTION] |
 | `B_tot` | total budget of one meta-run = K · B_step (GPU-h and tokens) | Section 6 |
 | `b` ∈ [0,B] | GPU-h consumed so far in an L1 run | |
@@ -322,7 +322,7 @@ Linear: extend the latest accepted variant ("accepted" = `J_sel` improved). Tree
 
 ## 6. Budget accounting and the fixed horizon
 
-- **One total budget per meta-run:** `B_tot = K · B_step`, covering GPU-h **and** LLM tokens (L0's own tokens included): `G_tot = K·B_step_gpu`, `T_tot = K·B_step_tok`. Defaults before the pilot [ASSUMPTION]: B = 0.25 GPU-h, `B_step_gpu` = 3B = 0.75 GPU-h, `B_step_tok` ≈ 0.7M tokens. For K = 15: 11.25 GPU-h, ≈10.5M tokens; for K = 20: 15 GPU-h, ≈14M tokens. Final values come from the pilot (Section 7).
+- **One total budget per meta-run:** `B_tot = K · B_step`, covering GPU-h **and** LLM tokens (L0's own tokens included): `G_tot = K·B_step_gpu`, `T_tot = K·B_step_tok`. Defaults before the pilot [ASSUMPTION]: B = 0.25 GPU-h, `B_step_gpu` = 3B = 0.75 GPU-h, `B_step_tok` ≈ 0.7M tokens. The design is K = 20, so at these assumptions `B_tot` is 15 GPU-h and ≈14M tokens. `B` and `B_step` still come from the pilot (Section 7); the pilot does not change K.
 - GPU-h = GPU occupancy of jobs started through `core.run_job` (wall-clock × GPUs held); LLM latency is not GPU time; the sandbox has no GPU device otherwise.
 - Per step, L0 decides how to split B_step (number of frameworks, budget and seeds each). With B_step = 3B one framework with 3 seeds fills a step, leaving L0 little room to split or reallocate; B_step = 6B is an [OPEN] option with real allocation. Unspent allocation is not carried over. A rejected step spends nothing and its budget is lost.
 - Token ledger: every LLM call goes through the core gateway, recording `{role ∈ {L0, L1}, run_id, k, tokens_in, tokens_out}`. A step ends when its plan finishes or either cap is exhausted. The core cuts an L1 run at B (GPU) or its token share, and L0 at its token share.
@@ -334,7 +334,7 @@ Linear: extend the latest accepted variant ("accepted" = `J_sel` improved). Tree
 ## 7. Pilot and the freeze of K and B_tot
 
 ### 7.1 Purpose
-Measure how fast `J_sel` improves with meta-steps and calibrate the cost per step, so K and `B_tot` can be fixed *before* the main runs from **D1 / `J_sel` only. D0 is never used** (the scorer is off, 7.2).
+Measure how fast `J_sel` improves with meta-steps and calibrate the cost per step, from **D1 / `J_sel` only**. `K` is already 20. The pilot checks that this horizon still fits `B_cap` and fixes `B_step` and `B_tot`. D0 is never used (the scorer is off, 7.2).
 
 ### 7.2 Pilot procedure
 1. **Pre-conditions:** Phase 0–6 acceptance tests pass (Section 12), including the pen-test; the core is tagged `core-pilot`. D0 is already in the vault but the scorer service is **stopped** and the D0 pane disabled (embargo mode on). No D0 plot is produced in the pilot.
@@ -357,10 +357,12 @@ With `C(1..5)` from the pilot:
 5. `K_budget = floor(B_cap / B_step)`, where `B_cap` is the per-meta-run cap on GPU-h and tokens set by the user [OPEN; default 15 GPU-h and ≈14M tokens].
 6. `K = min( clip(K_gain, K_lo, K_hi), K_budget )`, defaults `K_lo = 15`, `K_hi = 20`. `K_lo = 15` because the ranking test needs enough frameworks (n ≥ 15) and the tree needs room to branch. If `K_budget < K_lo`, K = `K_budget` and the prereg records "budget-limited, below target window".
 
-Worked examples (ρ_decay = 0.85, τ = 0.01): ĝ = 0.02 gives K_gain = 10, clipped to 15; ĝ = 0.06 gives 5 + ceil(11.02) = 17; ĝ = 0.10 gives 5 + ceil(14.2) = 20. The running max biases pilot gains upward (winner's curse), so the rule leans toward larger K; accepted. The user may override K **before** the freeze from D1 evidence only, recording the reason in `pilot_report.json`. Nothing about D0 may enter.
+Worked examples (ρ_decay = 0.85, τ = 0.01): ĝ = 0.02 gives K_gain = 10, clipped to 15; ĝ = 0.06 gives 5 + ceil(11.02) = 17; ĝ = 0.10 gives 5 + ceil(14.2) = 20. The running max biases pilot gains upward (winner's curse), so the rule leans toward larger K; accepted. Nothing about D0 may enter.
+
+**Override in force.** The user set `K = 20` on 26 Oct 2026, equal to `K_hi`, with no measured pilot curve. `configs/experiment.json` holds `K_min = K_max = 20`, and that is the value the runs use. The rule above stays implemented and tested. A smoke or pilot report may show the K the rule would have chosen; that number does not replace 20. If the pilot finds `K_budget < 20`, K is revisited in a new decision. The code does not lower it on its own. The written reason is `report_experiment/horizon.md`.
 
 ### 7.4 The freeze (after the pilot, before any main run)
-1. Write `configs/prereg.yaml` (K, `K_min = K_max = K`, B, B_step, B_tot (GPU-h and tokens), m, κ, `ξ_prod`, seed lists, carry-forward and election rules, kill rules, τ, ρ_decay, bootstrap and ranking-test settings, arm definitions) and `PREREG.md`.
+1. Write `configs/prereg.yaml` (`K = 20` from `configs/experiment.json`, `K_min = K_max = K`, B, B_step, B_tot (GPU-h and tokens), m, κ, `ξ_prod`, seed lists, carry-forward and election rules, kill rules, τ, ρ_decay, bootstrap and ranking-test settings, arm definitions) and `PREREG.md`.
 2. `python -m core.freeze`: refuses on a dirty tree; writes `core/CHECKSUMS.sha256`; computes `design_hash = sha256(core + configs + split hashes + initial level0/level1 + analysis code + d0vault code + runner image digest + PREREG.md)`; writes `prereg.json` (including the `pilot_report.json` hash); tags `prereg-v1`.
 3. **Only then** is the D0 scorer started and the D0 pane enabled (embargo mode off if live viewing is wanted [OPEN]). Pilot results are never re-scored on D0.
 4. After the freeze K and B_tot are hard constants. A longer run is a new design version (`core.freeze --bump`), decided from D1 only, applied to every arm; earlier runs are reported under their own version.
@@ -612,10 +614,11 @@ Do not start a phase until the previous phase's tests pass. All ATs are automate
 | `B_step` | 3B = 0.75 GPU-h (+ ≈0.7M tokens) | [ASSUMPTION], 6B option [OPEN] |
 | `m`, `n_meta` | 3, 3 (m = 5 option) | [OPEN] |
 | `K_pilot`, `n_pilot` | 5, 2 | [OPEN] |
-| `K_lo`, `K_hi` | 15, 20 | [OPEN] |
+| `K_lo`, `K_hi` | 15, 20 | rule window; the chosen K is `K_hi` |
 | `τ_0`, `c`, `ρ_decay` | 0.01, 0.5, 0.85 | [JUDGMENT] |
 | `B_cap` per meta-run | 15 GPU-h, ≈14M tokens | [OPEN] |
-| `K`, `B_tot` | from pilot | frozen in prereg |
+| `K` | 20 (`K_min = K_max`) | set by the user, 26 Oct 2026 |
+| `B_tot` | 20 · `B_step` (15 GPU-h and ≈14M tokens at the current `B_step`) | follows K; `B_step` still from the pilot |
 | `κ` | 10 (range 5–10) | [OPEN] |
 | `ξ_prod`, pilot seeds, main seeds | disjoint lists in prereg | fixed at freeze |
 | carry-forward; killed frameworks eligible | carry last score to B; yes | [OPEN] |
@@ -630,7 +633,7 @@ Do not start a phase until the previous phase's tests pass. All ATs are automate
 
 ## 15. Compute and time estimates
 
-**All numbers are [ASSUMPTION] until the pilot calibrates them.** Basis: Jena is small (45,536 training origins on D1_fit), so a GRU-sized script takes about 1–3 min on one GPU, giving about 5–8 nodes per B = 0.25 GPU-h run. Loop cost per meta-run = K · 3 seeds · B (a cap, no early stopping; L0 overhead is counted in tokens, not GPU-h). v5 at K = 10 totalled ≈316 GPU-h.
+**All numbers are [ASSUMPTION] until the pilot calibrates them.** The chosen design is the K = 20 column, about 511 GPU-h. Basis: Jena is small (45,536 training origins on D1_fit), so a GRU-sized script takes about 1–3 min on one GPU, giving about 5–8 nodes per B = 0.25 GPU-h run. Loop cost per meta-run = K · 3 seeds · B (a cap, no early stopping; L0 overhead is counted in tokens, not GPU-h). v5 at K = 10 totalled ≈316 GPU-h.
 
 | Item | Count | GPU-h each | K = 15 | K = 20 |
 |---|---|---|---|---|
@@ -670,6 +673,6 @@ Do not start a phase until the previous phase's tests pass. All ATs are automate
 - **Incumbent:** the candidate L1 would hand over now (highest `u`). **`S_sel(b)`:** its D1_sel score as GPU-h accrue. **`J_sel`:** mean of that curve over [0, B], median over seeds. **Carry-forward:** a stopped run's last score is held to B.
 - **Core / vault / outbox:** the immutable code that evaluates, accounts and controls access / the protected D0 store plus scorer / the append-only log of artifacts to score, the only run-side-to-vault link.
 - **Design hash, freeze, version bump:** hash of everything defining the experiment; commit-and-tag before runs; any later change is a new version.
-- **Pilot:** short D1-only run (≈5 steps) that calibrates cost and fixes K and `B_tot`.
+- **Pilot:** short D1-only run (≈5 steps) that calibrates cost and `B_step`. K is already 20.
 - **Ranking test:** comparison of the `J_sel` and `J_0` orderings of all frameworks (ρ_S, τ_b, rank of v̂, regret, four-point table, scatter). **Regret:** `J_0` gap between the best-on-D0 framework and the elected one.
 - **Phase 2:** one production run of the elected framework at κB with one fresh seed, giving `f_ideal`.

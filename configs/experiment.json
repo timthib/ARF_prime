@@ -1,0 +1,8 @@
+{
+  "K": 20,
+  "K_min": 20,
+  "K_max": 20,
+  "set_on": "2026-10-26",
+  "source": "user override, equal to K_hi, before any measured pilot curve",
+  "note": "The Section 7.3 rule stays tested. A dry-run of that rule does not replace this value. The pilot calibrates B_step and does not change K."
+}

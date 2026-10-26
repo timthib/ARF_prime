@@ -41,7 +41,7 @@ def test_three_step_run_keeps_the_vault_out_of_the_public_log(tmp_path: Path):
 
 
 def test_loop_source_is_not_given_the_vault():
-    source = Path("smoke/loop.py").read_text(encoding="utf-8")
+    source = Path(__file__).resolve().parents[1].joinpath("smoke", "loop.py").read_text(encoding="utf-8")
     assert "vault_scorer" not in source
     assert "fake_d0" not in source
     assert "materialise" not in source
@@ -103,6 +103,9 @@ def test_five_step_fixture_reports_the_worked_example(tmp_path: Path):
     summary = execute(tmp_path, steps=5, n=800, run_id="smoke-k")
     assert summary["curve_source"] == "fixture"
     assert summary["decision"]["k"] == 17
+    assert summary["K"] == 20
+    assert summary["K_min"] == 20
+    assert summary["K_max"] == 20
     assert summary["seeds"] == [91001]
     report = json.loads((tmp_path / "smoke-k" / "public" / "smoke_report.json").read_text(encoding="utf-8"))
     assert report["leak_check"] == "pass"
