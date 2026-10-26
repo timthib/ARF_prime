@@ -1,0 +1,14 @@
+{
+  "phase": "smoke",
+  "steps": 5,
+  "seeds": [91001],
+  "n": 70128,
+  "fit_frac": 0.65,
+  "d1_frac": 0.8,
+  "gap": 48,
+  "lookback": 24,
+  "horizon": 24,
+  "curve_source": "fixture",
+  "j_sel_fixture": [0.4, 0.5, 0.56, 0.62, 0.68],
+  "fixture_note": "Chosen so (C(5)-C(2))/3 = 0.06, the worked example that returns K = 17. This is not a measured curve."
+}

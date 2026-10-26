@@ -1,0 +1,9 @@
+[project]
+name = "arf-prime"
+version = "0.0.1"
+description = "Self-referential two-level research agent"
+requires-python = ">=3.9"
+readme = "README.md"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
