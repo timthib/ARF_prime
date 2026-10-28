@@ -22,13 +22,13 @@ B_STEP_TOK = 700_000
 DESIGN = "dev-unfrozen"
 T0 = datetime(2026, 10, 26, 8, 0, tzinfo=timezone.utc)
 
-# (local id, parent local id, operator, b, u, s)
+# (local id, parent local id, operator, family, b, u, s)
 STORY = [
-    (1, None, "draft", 0.04, 0.20, 0.34),
-    (2, 1, "debug", 0.08, 0.18, 0.40),
-    (3, 1, "improve", 0.12, 0.33, 0.28),
-    (4, 3, "improve", 0.18, 0.41, 0.46),
-    (5, 4, "improve", 0.25, 0.44, 0.50),
+    (1, None, "draft", "ridge", 0.04, 0.20, 0.34),
+    (2, 1, "debug", "ridge", 0.08, 0.18, 0.40),
+    (3, 1, "improve", "gru", 0.12, 0.33, 0.28),
+    (4, 3, "improve", "lstm", 0.18, 0.41, 0.46),
+    (5, 4, "improve", "transformer", 0.25, 0.44, 0.50),
 ]
 
 PILOT_CURVE = [0.40, 0.50, 0.56, 0.62, 0.68]
@@ -55,9 +55,41 @@ def _section_73(curve: list[float], sigma: float):
 def _vary(story, s_shift: float, keep: int | None = None):
     rows = story if keep is None else story[:keep]
     varied = []
-    for local, parent, operator, b, u, score in rows:
-        varied.append((local, parent, operator, b, u, round(score + s_shift, 4)))
+    for local, parent, operator, family, b, u, score in rows:
+        varied.append((local, parent, operator, family, b, u, round(score + s_shift, 4)))
     return varied
+
+
+def _thinking(what: str, how: str, why: str) -> str:
+    return json.dumps({"what": what, "how": how, "why": why}, sort_keys=True)
+
+
+def _l1_thinking(model: dict, incumbent: dict | None, became: bool) -> str:
+    label = model["label"]
+    family = model["family"]
+    parent = "no earlier model" if model["parent_model_id"] is None else "its parent"
+    what = {
+        "draft": f"Propose {label}, a {family}, as the first candidate.",
+        "debug": f"Debug {parent}. {label} is another {family} fit.",
+        "improve": f"Improve on {parent}. {label} is a {family}.",
+    }[model["operator"]]
+    how = (
+        f"Train on D1_fit only and score with validation u = {model['u']:.2f}. "
+        f"Record it at {model['b_created']:.2f} GPU-h. L1 does not see D1_sel."
+    )
+    if became and incumbent is None:
+        why = f"There is no incumbent yet, so {label} becomes the incumbent. The core scores it on D1_sel."
+    elif became:
+        why = (
+            f"u {model['u']:.2f} beats incumbent {incumbent['label']} at u {incumbent['u']:.2f}, "
+            f"so {label} becomes the incumbent. The core scores it on D1_sel."
+        )
+    else:
+        why = (
+            f"u {model['u']:.2f} does not beat incumbent {incumbent['label']} at u {incumbent['u']:.2f}. "
+            f"{label} stays on the branch and is not scored on D1_sel."
+        )
+    return _thinking(what, how, why)
 
 
 def _incumbents(models: list[dict]) -> list[dict]:
@@ -89,7 +121,7 @@ def _emit_seed(log: _Log, spec: dict, story, seed: int, status: str, when: datet
     framework_id = spec["fid"]
     run_id = f"{log.meta}-{framework_id}-s{seed}"
     models = []
-    for seq, (local, parent, operator, b, u, score) in enumerate(story, start=1):
+    for seq, (local, parent, operator, family, b, u, score) in enumerate(story, start=1):
         model_id = f"{run_id}-m{local}"
         parent_id = None if parent is None else f"{run_id}-m{parent}"
         models.append(
@@ -97,11 +129,13 @@ def _emit_seed(log: _Log, spec: dict, story, seed: int, status: str, when: datet
                 "model_id": model_id,
                 "parent_model_id": parent_id,
                 "operator": operator,
+                "family": family,
                 "b_created": b,
                 "u": u,
                 "s": score,
                 "seq": seq,
                 "local": local,
+                "label": f"model{seq}",
             }
         )
     chosen = {item["model_id"] for item in _incumbents(models)}
@@ -130,10 +164,12 @@ def _emit_seed(log: _Log, spec: dict, story, seed: int, status: str, when: datet
         tokens_used=tokens,
     )
     span = step_end - when if step_end is not None else timedelta(seconds=1080)
+    incumbent = None
     for model in models:
         fraction = model["b_created"] / B
         moment = when + timedelta(seconds=span.total_seconds() * min(fraction, 0.99))
         digest = _sha(model["model_id"])
+        became = model["model_id"] in chosen
         log.add(
             "model",
             model_id=model["model_id"],
@@ -143,6 +179,7 @@ def _emit_seed(log: _Log, spec: dict, story, seed: int, status: str, when: datet
             branch_id=model["parent_model_id"] or framework_id,
             parent_model_id=model["parent_model_id"],
             operator=model["operator"],
+            family=model["family"],
             seed=seed,
             b_created=model["b_created"],
             u=model["u"],
@@ -151,8 +188,10 @@ def _emit_seed(log: _Log, spec: dict, story, seed: int, status: str, when: datet
             artifact_sha256=digest,
             is_ideal_model=0,
             seq=model["seq"],
+            thinking=_l1_thinking(model, incumbent, became),
         )
-        became = model["model_id"] in chosen
+        if model["u"] is not None and (incumbent is None or model["u"] > incumbent["u"]):
+            incumbent = model
         message = {
             "draft": "draft candidate submitted",
             "debug": "debug candidate submitted",
@@ -280,6 +319,11 @@ def _loop_specs() -> list[dict]:
                 "n_max 8. The run ends at budget B.",
                 "Parents are the top 5 by J_sel.",
             ),
+            "thinking": _thinking(
+                "Open the meta-run on the initial framework v1. There is no parent.",
+                "Launch three seeds at budget B. L1 may draft, debug, and improve. n_max is 8 and the run stops at B. Parents later are the top 5 by J_sel.",
+                "This step is the baseline. Later frameworks are kept only when they beat a parent chosen from that top 5.",
+            ),
         },
         {
             "fid": "v2",
@@ -294,6 +338,11 @@ def _loop_specs() -> list[dict]:
                 "Unchanged.",
                 "Unchanged.",
             ),
+            "thinking": _thinking(
+                "Rewrite the draft prompt so the next framework asks for a seasonal residual feature.",
+                "Edit θ only. Leave the rules and the parent rule unchanged. Take v1 as the parent.",
+                "The hypothesis is that the feature lifts J_sel by about 0.05 over v1.",
+            ),
         },
         {
             "fid": "v4",
@@ -304,6 +353,11 @@ def _loop_specs() -> list[dict]:
             "phase": "loop",
             "rules": base_rules,
             "edit": _edit("Longer memory in the search tree.", "Unchanged.", "Unchanged."),
+            "thinking": _thinking(
+                "Give the search tree a longer memory.",
+                "Edit θ. Leave the rules unchanged. Parent is v2.",
+                "The hypothesis is that deeper memory lifts J_sel by about 0.04.",
+            ),
         },
         {
             "fid": "v5",
@@ -318,6 +372,11 @@ def _loop_specs() -> list[dict]:
                 "Unchanged.",
                 "Parent is v2, chosen from the top 5.",
             ),
+            "thinking": _thinking(
+                "Branch from v2 with a shorter debug loop, after v4 dropped.",
+                "Shorten the debug prompt. Choose the parent from the top 5, which selects v2.",
+                "The hypothesis is that a shorter debug recovers about 0.06 of J_sel.",
+            ),
         },
         {
             "fid": "v6",
@@ -329,6 +388,11 @@ def _loop_specs() -> list[dict]:
             "rules": raised,
             "killed_seed": 103,
             "edit": _edit("Operator set left as it was.", "n_max raised from 8 to 12.", "Unchanged."),
+            "thinking": _thinking(
+                "Allow more candidates late in the budget.",
+                "Raise n_max from 8 to 12. Leave the operators unchanged. Parent is v5.",
+                "The hypothesis is a late gain of about 0.03 on J_sel.",
+            ),
         },
         {
             "fid": "v7",
@@ -345,6 +409,11 @@ def _loop_specs() -> list[dict]:
                 "Draft prompt adds a calendar interaction.",
                 "Unchanged.",
                 "Parent is v5.",
+            ),
+            "thinking": _thinking(
+                "Add a calendar interaction to the draft prompt.",
+                "Edit θ. Leave the rules unchanged. Parent is v5. The three seeds are still inside budget B.",
+                "The hypothesis is a further gain of about 0.02 on J_sel.",
             ),
         },
     ]
@@ -429,6 +498,11 @@ def loop_events() -> tuple[list[dict], datetime]:
                     ),
                     sort_keys=True,
                 ),
+                l0_thinking=_thinking(
+                    "Try to stop the loop early by reading the core budget counter.",
+                    "Leave L1 unchanged. Add a rule that reads the counter, and a stop in φ when the counter is low.",
+                    "The intent was to save budget on a weak step. The core rejected the edit because it reads a budget counter. The step is consumed and nothing is spent.",
+                ),
             )
             log.add(
                 "log_line",
@@ -475,6 +549,7 @@ def loop_events() -> tuple[list[dict], datetime]:
             tamper_reason=None,
             parent_framework_id=spec["parent"],
             edit_json=json.dumps(spec["edit"], sort_keys=True),
+            l0_thinking=spec["thinking"],
         )
         if live:
             as_of = cursor + timedelta(seconds=1080)
@@ -499,8 +574,8 @@ def loop_events() -> tuple[list[dict], datetime]:
 def _pilot_story(target: float):
     score = round(target / 0.8, 6)
     return [
-        (1, None, "draft", 0.05, 0.20, score),
-        (2, 1, "improve", 0.25, 0.40, score),
+        (1, None, "draft", "ridge", 0.05, 0.20, score),
+        (2, 1, "improve", "gru", 0.25, 0.40, score),
     ]
 
 
@@ -541,6 +616,11 @@ def pilot_events() -> list[dict]:
             "hypothesis": "" if index == 1 else f"Pilot step {index}: measure cost and the D1 curve.",
             "rules": {"n_max": 8, "stop": "budget"},
             "edit": _edit("Pilot scaffold.", "Provisional n_max 8.", "Tree, short horizon."),
+            "thinking": _thinking(
+                f"Pilot step {index}: measure cost and the shape of the D1 curve.",
+                "Run three identical seeds on a provisional framework. n_max is 8. Stop at budget B. The D0 scorer stays off.",
+                "The pilot calibrates cost and the step budget. It does not change K.",
+            ),
         }
         # Identical seeds so the median equals the worked-example target.
         for seed in (9001, 9002, 9003):
@@ -589,6 +669,7 @@ def pilot_events() -> list[dict]:
             tamper_reason=None,
             parent_framework_id=parent,
             edit_json=json.dumps(spec["edit"], sort_keys=True),
+            l0_thinking=spec["thinking"],
         )
         parent = fid
         cursor = t_end

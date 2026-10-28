@@ -1,5 +1,6 @@
 import { createContext, useContext } from "react";
 import { dur, gloss, gpu, jfmt, tok } from "./api";
+import { Sym } from "./marks";
 
 export const Nav = createContext({ go() {}, commands: [] });
 
@@ -55,7 +56,9 @@ export function Strip({ strip }) {
       </div>
       <div className="cell" title={gloss.j_sel}>
         <span className="kicker">{strip.elected ? "Elected" : "Would elect"}</span>
-        <strong className="num">{jfmt(strip.leading_j_sel)}</strong>
+        <strong className="num">
+          <Sym base="J" sub="sel" /> {jfmt(strip.leading_j_sel)}
+        </strong>
         <span className="muted">
           {strip.leading_framework_id || "—"} · {verdict}
         </span>

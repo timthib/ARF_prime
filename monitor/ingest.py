@@ -19,7 +19,7 @@ TABLES: dict[str, list[str]] = {
         "meta_run_id", "ts", "design_hash", "k", "t_start", "t_end",
         "budget_gpu_h", "budget_tokens", "spent_gpu_h", "spent_tokens",
         "l0_s", "l1_s", "hypothesis_id", "hypothesis_text", "status", "phase",
-        "tamper_reason", "parent_framework_id", "edit_json",
+        "tamper_reason", "parent_framework_id", "edit_json", "l0_thinking",
     ],
     "l1_run": [
         "meta_run_id", "ts", "design_hash", "run_id", "k", "framework_id",
@@ -34,8 +34,9 @@ TABLES: dict[str, list[str]] = {
     ],
     "model": [
         "model_id", "meta_run_id", "ts", "design_hash", "run_id", "framework_id",
-        "branch_id", "parent_model_id", "operator", "seed", "b_created", "u",
+        "branch_id", "parent_model_id", "operator", "family", "seed", "b_created", "u",
         "status", "artifact_path", "artifact_sha256", "is_ideal_model", "seq",
+        "thinking",
     ],
     "eval_event": [
         "meta_run_id", "ts", "design_hash", "run_id", "model_id", "b", "split",

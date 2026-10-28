@@ -80,7 +80,7 @@ def read_db(db_path: Path) -> dict:
             "models": _rows(connection, "SELECT * FROM model ORDER BY seq"),
             "evals": _rows(
                 connection,
-                "SELECT run_id, model_id, b, s, trigger FROM eval_event ORDER BY b",
+                "SELECT run_id, model_id, b, s, e_mae, trigger FROM eval_event ORDER BY b",
             ),
             "logs": _rows(
                 connection,
@@ -128,6 +128,29 @@ def _json_object(text: str | None) -> dict:
         return {}
     value = json.loads(text)
     return value if isinstance(value, dict) else {}
+
+
+def _thinking(raw) -> dict | None:
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, dict):
+        parsed = raw
+    else:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {"what": str(raw), "how": "", "why": ""}
+    if not isinstance(parsed, dict):
+        return {"what": str(parsed), "how": "", "why": ""}
+    return {
+        "what": str(parsed.get("what") or ""),
+        "how": str(parsed.get("how") or ""),
+        "why": str(parsed.get("why") or ""),
+    }
+
+
+def _model_label(seq: int) -> str:
+    return f"model{int(seq)}"
 
 
 def _display_curve(points: list[dict], end_b: float, carried: bool) -> list[dict]:
@@ -294,6 +317,7 @@ def _step_slots(data: dict) -> list[dict]:
                     "slot": "future",
                     "status": None,
                     "hypothesis": "",
+                    "l0_thinking": None,
                     "tamper_reason": None,
                     "framework_id": None,
                     "parent_framework_id": None,
@@ -354,6 +378,7 @@ def _step_slots(data: dict) -> list[dict]:
                 "slot": "live" if live else "done",
                 "status": step["status"],
                 "hypothesis": step["hypothesis_text"] or "",
+                "l0_thinking": _thinking(step.get("l0_thinking")),
                 "tamper_reason": step["tamper_reason"],
                 "framework_id": None if framework is None else framework["framework_id"],
                 "parent_framework_id": step["parent_framework_id"],
@@ -453,9 +478,467 @@ def _tree(data: dict) -> list[dict]:
     return nodes
 
 
+def _metric_name(rules: dict) -> str:
+    for key in ("metric", "score", "selection_metric"):
+        value = rules.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return "u"
+
+
+def _problem_line(message: str) -> bool:
+    text = message.lower()
+    return any(word in text for word in ("reject", "tamper", "error", "exception", "failed", "traceback"))
+
+
+def _logs(data: dict) -> list[dict]:
+    framework_of = {row["run_id"]: row["framework_id"] for row in data["l1"]}
+    lines = []
+    for row in data["logs"]:
+        message = row["message"] or ""
+        lines.append(
+            {
+                "ts": row["ts"],
+                "k": row["k"],
+                "role": row["role"],
+                "run_id": row["run_id"],
+                "model_id": row["model_id"],
+                "framework_id": framework_of.get(row["run_id"]),
+                "message": message,
+                "level": "problem" if _problem_line(message) else "info",
+            }
+        )
+    return lines
+
+
+def _run_span_s(data: dict, run_id: str) -> float | None:
+    stamps = [parse_ts(row["ts"]) for row in data["logs"] if row["run_id"] == run_id]
+    if len(stamps) < 2:
+        return None
+    return (max(stamps) - min(stamps)).total_seconds()
+
+
+def _final_incumbent(data: dict, run: dict, curve: dict) -> tuple[float | None, float | None]:
+    real = [point for point in curve["curve"] if not point.get("carried")]
+    if not real:
+        return None, None
+    last = real[-1]
+    model = next((row for row in data["models"] if row["model_id"] == last["model_id"]), None)
+    score_u = None if model is None else model["u"]
+    return score_u, last["s"]
+
+
+def _framework_card(data: dict, framework: dict, index: int, leading_id: str | None) -> dict:
+    framework_id = framework["framework_id"]
+    paired = _areas(data, framework_id)
+    finished = bool(paired) and all(run["status"] in FINISHED for run, _curve in paired)
+    areas = [curve["area"] for _run, curve in paired if curve["area"] is not None]
+    j_sel = median(areas) if finished and areas else None
+    models = [row for row in data["models"] if row["framework_id"] == framework_id]
+    scores_u = [row["u"] for row in models if row["u"] is not None]
+    gaps = []
+    finals = []
+    seed_line = []
+    gpu_alloc = 0.0
+    tokens = 0
+    span = 0.0
+    any_span = False
+    for run, curve in paired:
+        gpu_alloc += float(run["alloc_gpu_h"] or 0.0)
+        tokens += int(run["tokens_used"] or 0)
+        seconds = _run_span_s(data, run["run_id"])
+        if seconds is not None:
+            span += seconds
+            any_span = True
+        score_u, score_s = _final_incumbent(data, run, curve)
+        if score_s is not None:
+            finals.append(score_s)
+        if score_u is not None and score_s is not None:
+            gaps.append(float(score_u) - float(score_s))
+        seed_line.append(
+            {
+                "seed": run["seed"],
+                "status": run["status"],
+                "area": curve["area"],
+                "gpu_h_used": run["gpu_h_used"],
+                "alloc_gpu_h": run["alloc_gpu_h"],
+                "run_id": run["run_id"],
+            }
+        )
+    if any(seed["status"] == "running" for seed in seed_line):
+        status = "running"
+    elif any(seed["status"] == "killed" for seed in seed_line):
+        status = "killed"
+    elif seed_line and all(seed["status"] == "complete" for seed in seed_line):
+        status = "complete"
+    elif seed_line:
+        status = "partial"
+    else:
+        status = "pending"
+    rules = _json_object(framework["rules_json"])
+    overfit = _card_overfit(data, framework_id)
+    return {
+        "index": index,
+        "framework_id": framework_id,
+        "k": framework["k_first"],
+        "parent_framework_id": framework["parent_framework_id"],
+        "hypothesis": framework["hypothesis_text"] or "",
+        "n_models": len(models),
+        "best_u": None if not scores_u else max(scores_u),
+        "metric": _metric_name(rules),
+        "gpu_h": round(_gpu_cost(data, framework_id), 6),
+        "gpu_alloc": round(gpu_alloc, 6),
+        "tokens": tokens,
+        "span_s": None if not any_span else span,
+        "j_sel": j_sel,
+        "s_final": median(finals) if finished and finals else None,
+        "gap": median(gaps) if finished and gaps else None,
+        "spread": overfit["spread"],
+        "overfit_steps": overfit["overfit_steps"],
+        "selection_loss": overfit["selection_loss"],
+        "seeds_done": sum(1 for seed in seed_line if seed["status"] in FINISHED),
+        "seeds_total": len(seed_line),
+        "status": status,
+        "leading": framework_id == leading_id,
+        "elected": bool(framework["elected"]),
+        "n_killed": framework["n_killed"],
+        "seed_line": seed_line,
+        "killable": False,
+    }
+
+
+def _framework_cards(data: dict) -> list[dict]:
+    leader = _leading(data)
+    leading_id = None if leader is None else leader["framework_id"]
+    ordered = sorted(data["frameworks"], key=lambda row: (row["k_first"], row["framework_id"]))
+    return [
+        _framework_card(data, framework, index, leading_id)
+        for index, framework in enumerate(ordered, start=1)
+    ]
+
+
+def _cloud(cards: list[dict]) -> list[dict]:
+    return [
+        {
+            "index": card["index"],
+            "framework_id": card["framework_id"],
+            "k": card["k"],
+            "j_sel": card["j_sel"],
+            "leading": card["leading"],
+            "status": card["status"],
+        }
+        for card in cards
+    ]
+
+
+def _incumbent_check(cards: list[dict]) -> dict:
+    points = [
+        {
+            "index": card["index"],
+            "framework_id": card["framework_id"],
+            "s_final": card["s_final"],
+            "j_sel": card["j_sel"],
+            "leading": card["leading"],
+        }
+        for card in cards
+        if card["s_final"] is not None
+    ]
+    elected = next((card for card in cards if card["leading"]), None)
+    verdict = "J_sel is not available until a framework finishes its seeds."
+    elected_id = None
+    best_id = None
+    if elected is not None and elected["s_final"] is not None and points:
+        elected_id = elected["framework_id"]
+        best = max(points, key=lambda point: (point["s_final"], -point["index"]))
+        best_id = best["framework_id"]
+        if best_id == elected_id:
+            verdict = (
+                f"{elected_id} has the best J_sel and the highest final incumbent score on D1_sel."
+            )
+        else:
+            verdict = (
+                f"J_sel elects {elected_id}. "
+                f"The highest final incumbent score on D1_sel belongs to {best_id}."
+            )
+    return {
+        "points": points,
+        "elected_framework_id": elected_id,
+        "best_s_framework_id": best_id,
+        "verdict": verdict,
+    }
+
+
+def _note(level: str, text: str, k, framework_id, scope: str) -> dict:
+    return {"level": level, "text": text, "k": k, "framework_id": framework_id, "scope": scope}
+
+
+def _attention(data: dict, cards: list[dict]) -> list[dict]:
+    header = data["header"]
+    notes = []
+    live_k = next((step["k"] for step in data["steps"] if step["status"] == "running"), None)
+    lamp = design_lamp(header)
+    if lamp["level"] == "bad":
+        notes.append(_note("bad", lamp["text"], None, None, "now"))
+    if header["scorer_state"] == "stuck":
+        notes.append(_note("bad", "The D0 scorer is stuck. The outbox is not moving.", None, None, "now"))
+    elif header["phase"] == "loop" and header["scorer_state"] == "stopped" and int(data["outbox_depth"]) > 0:
+        notes.append(
+            _note(
+                "watch",
+                (
+                    f"The D0 scorer is stopped with {int(data['outbox_depth'])} artifacts waiting. "
+                    "Those scores stay on this dashboard."
+                ),
+                None,
+                None,
+                "now",
+            )
+        )
+    running_steps = [step for step in data["steps"] if step["status"] == "running"]
+    if data["steps"] and not running_steps and _current_k(data) < int(header["k_horizon"]):
+        notes.append(
+            _note(
+                "bad",
+                f"Nothing is running. The meta-run stopped at step {_current_k(data)}.",
+                _current_k(data),
+                None,
+                "now",
+            )
+        )
+    if live_k is not None:
+        live = [run for run in data["l1"] if run["k"] == live_k and run["status"] == "running"]
+        seeds = sorted({run["seed"] for run in live})
+        if len(seeds) > 1:
+            listed = ", ".join(str(seed) for seed in seeds)
+            notes.append(
+                _note(
+                    "watch",
+                    (
+                        f"Seeds {listed} are running in step {live_k}. "
+                        "The procedure runs one seed at a time and does not feed results back between seeds."
+                    ),
+                    live_k,
+                    None,
+                    "now",
+                )
+            )
+    for step in data["steps"]:
+        if step["status"] != "rejected":
+            continue
+        scope = "now" if step["k"] == live_k else "record"
+        notes.append(_note("bad", step["tamper_reason"] or "The core rejected the edit.", step["k"], None, scope))
+    for row in data["kills"]:
+        scope = "now" if row["k"] == live_k else "record"
+        notes.append(_note("bad", row["reason"], row["k"], row["framework_id"], scope))
+    for card in cards:
+        if card["overfit_steps"]:
+            count = card["overfit_steps"]
+            word = "change" if count == 1 else "changes"
+            notes.append(
+                _note(
+                    "watch",
+                    f"{card['framework_id']} has {count} incumbent {word} where u rose and S_sel fell.",
+                    card["k"],
+                    card["framework_id"],
+                    "record",
+                )
+            )
+    return notes
+
+
+def _now(data: dict) -> dict:
+    header = data["header"]
+    k = _current_k(data)
+    running = []
+    for run in data["l1"]:
+        if run["k"] != k or run["status"] != "running":
+            continue
+        logs = [row for row in data["logs"] if row["run_id"] == run["run_id"]]
+        last = logs[-1] if logs else None
+        running.append(
+            {
+                "framework_id": run["framework_id"],
+                "seed": run["seed"],
+                "run_id": run["run_id"],
+                "b": run["gpu_h_used"],
+                "B": header["b_gpu"],
+                "last_log": None if last is None else last["message"],
+                "model_id": None if last is None else last["model_id"],
+            }
+        )
+    running.sort(key=lambda row: (row["seed"], row["framework_id"]))
+    return {"k": k, "running": running}
+
+
+def _journey(data: dict, cards: list[dict]) -> list[dict]:
+    header = data["header"]
+    horizon = int(header["k_horizon"])
+    k = _current_k(data)
+    running = any(step["status"] == "running" for step in data["steps"])
+    frozen = int(header["design_version"]) >= 1
+    scorer = header["scorer_state"]
+    if scorer == "stuck":
+        scorer_state = "problem"
+    elif scorer == "polling":
+        scorer_state = "running"
+    else:
+        scorer_state = "waiting"
+    if not data["steps"]:
+        loop_state = "waiting"
+    elif running:
+        loop_state = "running"
+    elif k >= horizon:
+        loop_state = "done"
+    else:
+        loop_state = "problem"
+    elected_row = next((row for row in data["frameworks"] if row["elected"]), None)
+    leader = next((card for card in cards if card["leading"]), None)
+    if elected_row is not None or (not running and k >= horizon and leader is not None):
+        elect_state = "done"
+    elif leader is not None:
+        elect_state = "running"
+    else:
+        elect_state = "waiting"
+    elect_detail = "The core has not closed the election."
+    if elected_row is not None:
+        elect_detail = f"Core flag on {elected_row['framework_id']}."
+    elif leader is not None:
+        elect_detail = f"Best J_sel so far is {leader['framework_id']}."
+    production = [run for run in data["l1"] if run["phase"] == "production"]
+    if any(run["status"] == "running" for run in production):
+        phase2_state = "running"
+    elif any(run["status"] in FINISHED for run in production):
+        phase2_state = "done"
+    else:
+        phase2_state = "waiting"
+    return [
+        {
+            "id": "freeze",
+            "label": "Freeze",
+            "state": "done" if frozen else "waiting",
+            "detail": header["design_hash"] if frozen else "Design version is still 0.",
+        },
+        {
+            "id": "scorer",
+            "label": "D0 scorer",
+            "state": scorer_state,
+            "detail": f"{scorer} · outbox {int(data['outbox_depth'])}",
+        },
+        {
+            "id": "loop",
+            "label": f"Meta-step {k} / {horizon}",
+            "state": loop_state,
+            "detail": header["phase"],
+        },
+        {
+            "id": "elect",
+            "label": "Elect by J_sel",
+            "state": elect_state,
+            "detail": elect_detail,
+        },
+        {
+            "id": "phase2",
+            "label": "Phase 2",
+            "state": phase2_state,
+            "detail": "Elected framework alone, one fresh seed.",
+        },
+        {
+            "id": "rank",
+            "label": "Ranking test",
+            "state": "waiting",
+            "detail": "After step K, on the D0 pane.",
+        },
+    ]
+
+
+def _step_sequence(data: dict, k: int, slot: dict) -> list[dict]:
+    if slot["slot"] == "future":
+        return [
+            {"id": "prepare", "label": "1. L0 prepares the frameworks", "state": "waiting", "detail": ""},
+            {"id": "allocate", "label": "2. L0 splits the step budget", "state": "waiting", "detail": ""},
+            {"id": "seeds", "label": "3. Seeds, one after another", "state": "waiting", "detail": ""},
+            {"id": "report", "label": "4. J_sel, then L0 kills and elects", "state": "waiting", "detail": ""},
+            {"id": "rewrite", "label": "5. L0 rewrites the next step", "state": "waiting", "detail": ""},
+        ]
+    runs = [run for run in data["l1"] if run["k"] == k]
+    rejected = slot["status"] == "rejected"
+    prepare = {
+        "id": "prepare",
+        "label": "1. L0 prepares the frameworks",
+        "state": "problem" if rejected else "done",
+        "detail": slot["tamper_reason"] or slot["hypothesis"] or "Initial framework.",
+    }
+    if rejected:
+        skipped = "The step is consumed. Nothing is spent."
+        return [
+            prepare,
+            {"id": "allocate", "label": "2. L0 splits the step budget", "state": "skipped", "detail": skipped},
+            {"id": "seeds", "label": "3. Seeds, one after another", "state": "skipped", "detail": skipped},
+            {"id": "report", "label": "4. J_sel, then L0 kills and elects", "state": "skipped", "detail": skipped},
+            {
+                "id": "rewrite",
+                "label": "5. L0 rewrites the next step",
+                "state": "done" if any(step["k"] > k for step in data["steps"]) else "waiting",
+                "detail": "A rejected edit still uses the step slot.",
+            },
+        ]
+    if runs:
+        allocate_state = "done"
+        allocate_detail = f"{len({run['framework_id'] for run in runs})} frameworks, {len(runs)} runs."
+    else:
+        allocate_state = "running" if slot["status"] == "running" else "waiting"
+        allocate_detail = "No L1 run has been recorded."
+    seeds = sorted({run["seed"] for run in runs})
+    seed_bits = []
+    for seed in seeds:
+        group = [run for run in runs if run["seed"] == seed]
+        if any(run["status"] == "running" for run in group):
+            state = "running"
+        elif all(run["status"] in FINISHED for run in group):
+            state = "done"
+        else:
+            state = "waiting"
+        seed_bits.append(f"{seed} {state}")
+    if not seeds:
+        seed_state = "waiting"
+    elif any(run["status"] == "running" for run in runs):
+        seed_state = "running"
+    elif all(run["status"] in FINISHED for run in runs):
+        seed_state = "done"
+    else:
+        seed_state = "waiting"
+    report_ready = bool(runs) and all(run["status"] in FINISHED for run in runs)
+    later = any(step["k"] > k for step in data["steps"])
+    return [
+        prepare,
+        {"id": "allocate", "label": "2. L0 splits the step budget", "state": allocate_state, "detail": allocate_detail},
+        {
+            "id": "seeds",
+            "label": "3. Seeds, one after another",
+            "state": seed_state,
+            "detail": " · ".join(seed_bits),
+        },
+        {
+            "id": "report",
+            "label": "4. J_sel, then L0 kills and elects",
+            "state": "done" if report_ready else "waiting",
+            "detail": "Median of the seed areas." if report_ready else "Waiting until every seed of this step has finished.",
+        },
+        {
+            "id": "rewrite",
+            "label": "5. L0 rewrites the next step",
+            "state": "done" if later else "waiting",
+            "detail": "The next step is on record." if later else "L0 has not opened the next step.",
+        },
+    ]
+
+
 def shape_run(data: dict) -> dict:
     header = data["header"]
     slots = _step_slots(data)
+    cards = _framework_cards(data)
+    k = _current_k(data)
+    live_slot = next((slot for slot in slots if slot["k"] == k), None)
     return {
         "meta_run_id": header["meta_run_id"],
         "arm": header["arm"],
@@ -469,29 +952,184 @@ def shape_run(data: dict) -> dict:
         "burn": _burn(data, slots),
         "wall": _fill_wall(data, _wall(slots)),
         "tree": _tree(data),
+        "cards": cards,
+        "cloud": _cloud(cards),
+        "incumbent_check": _incumbent_check(cards),
+        "attention": _attention(data, cards),
+        "now": _now(data),
+        "journey": _journey(data, cards),
+        "live_sequence": [] if live_slot is None else _step_sequence(data, k, live_slot),
+        "logs": _logs(data),
     }
 
 
-def _models(data: dict, run_id: str) -> list[dict]:
+def _family_label(row: dict) -> str:
+    family = row.get("family")
+    if family:
+        return str(family)
+    return row.get("operator") or "unspecified"
+
+
+def _best_u(models: list[dict]) -> list[dict]:
+    ordered = sorted(models, key=lambda model: (model["b_created"], model["seq"]))
+    best = None
+    series = []
+    for model in ordered:
+        score = model["u"]
+        if score is None:
+            continue
+        if best is None or score > best:
+            best = score
+            series.append(
+                {
+                    "b": model["b_created"],
+                    "u": score,
+                    "model_id": model["model_id"],
+                    "label": model.get("label") or _model_label(model["seq"]),
+                    "seq": model["seq"],
+                    "family": model["family"],
+                }
+            )
+    return series
+
+
+def _models(data: dict, run: dict) -> list[dict]:
+    run_id = run["run_id"]
     incumbents = {row["model_id"] for row in data["evals"] if row["run_id"] == run_id}
-    models = []
-    for row in data["models"]:
+    scored: dict[str, dict] = {}
+    for row in data["evals"]:
         if row["run_id"] != run_id:
             continue
+        previous = scored.get(row["model_id"])
+        if previous is None or row["b"] >= previous["b"]:
+            scored[row["model_id"]] = row
+    spent: dict[str, float] = {}
+    for span in _spans(data, run):
+        width = float(span["b1"]) - float(span["b0"])
+        spent[span["model_id"]] = spent.get(span["model_id"], 0.0) + width
+    rows = [row for row in data["models"] if row["run_id"] == run_id]
+    children: dict[str, int] = {}
+    for row in rows:
+        parent = row["parent_model_id"]
+        if parent:
+            children[parent] = children.get(parent, 0) + 1
+    ordered = sorted(rows, key=lambda row: (float(row["b_created"]), row["seq"]))
+    produced: dict[str, float] = {}
+    previous_b = 0.0
+    best_u = None
+    current_id = None
+    for row in ordered:
+        produced[row["model_id"]] = round(max(0.0, float(row["b_created"]) - previous_b), 6)
+        previous_b = float(row["b_created"])
+        score = row["u"]
+        if score is not None and (best_u is None or score > best_u):
+            best_u = score
+            current_id = row["model_id"]
+    models = []
+    for row in rows:
+        evaluation = scored.get(row["model_id"])
+        held = spent.get(row["model_id"], 0.0)
         models.append(
             {
                 "model_id": row["model_id"],
+                "label": _model_label(row["seq"]),
                 "parent_model_id": row["parent_model_id"],
                 "operator": row["operator"],
+                "family": _family_label(row),
                 "u": row["u"],
+                "s_sel": None if evaluation is None else evaluation["s"],
+                "s_mae": None if evaluation is None else evaluation["e_mae"],
+                "b_scored": None if evaluation is None else evaluation["b"],
                 "b_created": row["b_created"],
+                "gpu_h": produced.get(row["model_id"], round(held, 6)),
+                "n_updates": children.get(row["model_id"], 0),
                 "status": row["status"],
                 "artifact_sha256": row["artifact_sha256"],
                 "incumbent": row["model_id"] in incumbents,
+                "current": row["model_id"] == current_id,
                 "seed": row["seed"],
+                "seq": row["seq"],
+                "thinking": _thinking(row.get("thinking")),
+                "overfit": False,
+                "spread": None,
             }
         )
     return models
+
+
+def _overfit_summary(models: list[dict]) -> dict:
+    """Incumbent path. An overfit step is a rise in u together with a fall in S_sel."""
+    ordered = sorted(
+        (
+            model
+            for model in models
+            if model.get("incumbent") and model.get("u") is not None and model.get("s_sel") is not None
+        ),
+        key=lambda model: (float(model["b_created"]), model["seq"]),
+    )
+    events = []
+    for previous, nxt in zip(ordered, ordered[1:]):
+        du = float(nxt["u"]) - float(previous["u"])
+        ds = float(nxt["s_sel"]) - float(previous["s_sel"])
+        events.append(
+            {
+                "from_label": previous["label"],
+                "to_label": nxt["label"],
+                "from_id": previous["model_id"],
+                "to_id": nxt["model_id"],
+                "b": nxt["b_created"],
+                "u": nxt["u"],
+                "s_sel": nxt["s_sel"],
+                "du": round(du, 6),
+                "ds": round(ds, 6),
+                "overfit": du > 1e-9 and ds < -1e-9,
+            }
+        )
+    flagged = {event["to_id"] for event in events if event["overfit"]}
+    for model in models:
+        model["overfit"] = model["model_id"] in flagged
+        if model.get("u") is not None and model.get("s_sel") is not None:
+            model["spread"] = round(float(model["u"]) - float(model["s_sel"]), 6)
+        else:
+            model["spread"] = None
+    losses = [-event["ds"] for event in events if event["overfit"]]
+    last = ordered[-1] if ordered else None
+    return {
+        "n_changes": len(events),
+        "n_overfit": len(losses),
+        "selection_loss": None if not events else round(sum(losses), 6),
+        "spread": None if last is None else round(float(last["u"]) - float(last["s_sel"]), 6),
+        "events": events,
+    }
+
+
+def _card_overfit(data: dict, framework_id: str) -> dict:
+    summaries = []
+    for run, _curve in _areas(data, framework_id):
+        summaries.append(_overfit_summary(_models(data, run)))
+    spreads = [item["spread"] for item in summaries if item["spread"] is not None]
+    losses = [item["selection_loss"] for item in summaries if item["selection_loss"] is not None]
+    steps = [item["n_overfit"] for item in summaries]
+    return {
+        "spread": None if not spreads else median(spreads),
+        "overfit_steps": 0 if not steps else max(steps),
+        "selection_loss": None if not losses else median(losses),
+    }
+
+
+def _model_seeds(data: dict, framework_id: str) -> list[dict]:
+    seeds = []
+    for run, _curve in _areas(data, framework_id):
+        models = _models(data, run)
+        seeds.append(
+            {
+                "seed": run["seed"],
+                "status": run["status"],
+                "overfit": _overfit_summary(models),
+                "models": models,
+            }
+        )
+    return seeds
 
 
 def _spans(data: dict, run: dict) -> list[dict]:
@@ -514,8 +1152,12 @@ def shape_framework(data: dict, framework_id: str) -> dict | None:
     seeds = []
     scatter = []
     for run, curve in _areas(data, framework_id):
-        models = _models(data, run["run_id"])
+        models = _models(data, run)
+        summary = _overfit_summary(models)
         by_id = {model["model_id"]: model for model in models}
+        for point in curve["curve"]:
+            named = by_id.get(point["model_id"])
+            point["label"] = None if named is None else named["label"]
         eval_keys = {
             (row["model_id"], row["b"])
             for row in data["evals"]
@@ -528,9 +1170,11 @@ def shape_framework(data: dict, framework_id: str) -> dict | None:
             scatter.append(
                 {
                     "model_id": point["model_id"],
+                    "label": model["label"],
                     "seed": run["seed"],
                     "u": model["u"],
                     "s_sel": point["s"],
+                    "overfit": model["overfit"],
                 }
             )
         logs = [
@@ -538,6 +1182,10 @@ def shape_framework(data: dict, framework_id: str) -> dict | None:
             for row in data["logs"]
             if row["run_id"] == run["run_id"]
         ]
+        gpu = _spans(data, run)
+        for span in gpu:
+            named = by_id.get(span["model_id"])
+            span["label"] = None if named is None else named["label"]
         seeds.append(
             {
                 "seed": run["seed"],
@@ -548,22 +1196,39 @@ def shape_framework(data: dict, framework_id: str) -> dict | None:
                 "gpu_h_used": run["gpu_h_used"],
                 "alloc_gpu_h": run["alloc_gpu_h"],
                 "curve": curve["curve"],
+                "best_u": _best_u(models),
                 "models": models,
-                "gpu": _spans(data, run),
+                "overfit": summary,
+                "gpu": gpu,
                 "logs": logs,
             }
         )
     areas = [seed["area"] for seed in seeds if seed["area"] is not None]
+    done = bool(seeds) and all(seed["area"] is not None for seed in seeds)
+    rules = _json_object(framework["rules_json"])
+    card = next((item for item in _framework_cards(data) if item["framework_id"] == framework_id), None)
     return {
         "meta_run_id": data["header"]["meta_run_id"],
         "framework_id": framework_id,
         "parent_framework_id": framework["parent_framework_id"],
         "k": framework["k_first"],
         "hypothesis": framework["hypothesis_text"] or "",
+        "l0_thinking": _thinking(
+            next((step.get("l0_thinking") for step in data["steps"] if step["k"] == framework["k_first"]), None)
+        ),
         "snapshot": framework["level1_snapshot"],
-        "rules": _json_object(framework["rules_json"]),
+        "rules": rules,
+        "metric": _metric_name(rules),
         "edit": _json_object(framework["edit_json"]),
-        "j_sel_median": median(areas) if areas and all(seed["area"] is not None for seed in seeds) else None,
+        "j_sel_median": median(areas) if done else None,
+        "gap": None if card is None else card["gap"],
+        "spread": None if card is None else card["spread"],
+        "overfit_steps": 0 if card is None else card["overfit_steps"],
+        "selection_loss": None if card is None else card["selection_loss"],
+        "s_final": None if card is None else card["s_final"],
+        "best_u": None if card is None else card["best_u"],
+        "n_models": 0 if card is None else card["n_models"],
+        "gpu_h": None if card is None else card["gpu_h"],
         "ci_lo": min(areas) if areas and all(seed["area"] is not None for seed in seeds) else None,
         "ci_hi": max(areas) if areas and all(seed["area"] is not None for seed in seeds) else None,
         "ci_label": "min–max of the seeds",
@@ -584,40 +1249,29 @@ def shape_step(data: dict, k: int) -> dict | None:
     step_row = next((row for row in data["steps"] if row["k"] == k), None)
     frameworks = [row for row in data["frameworks"] if row["k_first"] == k]
     cards = []
-    for framework in frameworks:
-        seed_cards = []
-        for run, curve in _areas(data, framework["framework_id"]):
-            seed_cards.append(
-                {
-                    "seed": run["seed"],
-                    "status": run["status"],
-                    "area": curve["area"],
-                    "gpu_h_used": run["gpu_h_used"],
-                    "alloc_gpu_h": run["alloc_gpu_h"],
-                    "run_id": run["run_id"],
-                }
-            )
-        cards.append(
-            {
-                "framework_id": framework["framework_id"],
-                "status": "running" if any(seed["status"] == "running" for seed in seed_cards) else "complete",
-                "j_sel_median": slot["j_sel_median"],
-                "killable": slot["status"] == "running",
-                "seeds": seed_cards,
-                "edit": _json_object(framework["edit_json"]),
-            }
-        )
-    edit = cards[0]["edit"] if cards else _json_object(None if step_row is None else step_row["edit_json"])
+    for card in shaped["cards"]:
+        if card["k"] != k:
+            continue
+        copied = dict(card)
+        copied["killable"] = slot["status"] == "running"
+        copied["seeds"] = card["seed_line"]
+        copied["model_seeds"] = _model_seeds(data, card["framework_id"])
+        cards.append(copied)
+    edit = (
+        _json_object(frameworks[0]["edit_json"])
+        if frameworks
+        else _json_object(None if step_row is None else step_row["edit_json"])
+    )
     allocation = []
     for card in cards:
-        per_gpu = [seed["alloc_gpu_h"] for seed in card["seeds"]]
+        per_gpu = [seed["alloc_gpu_h"] for seed in card["seed_line"]]
         allocation.append(
             {
                 "framework_id": card["framework_id"],
-                "seeds": len(card["seeds"]),
+                "seeds": len(card["seed_line"]),
                 "gpu_per_seed": per_gpu[0] if per_gpu else None,
                 "tokens_per_seed": None
-                if not card["seeds"]
+                if not card["seed_line"]
                 else next(
                     run["alloc_tokens"]
                     for run in data["l1"]
@@ -649,11 +1303,14 @@ def shape_step(data: dict, k: int) -> dict | None:
         "slot": slot["slot"],
         "status": slot["status"],
         "hypothesis": slot["hypothesis"],
+        "l0_thinking": slot.get("l0_thinking"),
         "tamper_reason": slot["tamper_reason"],
         "parent_framework_id": slot["parent_framework_id"],
         "edit": edit,
         "allocation": allocation,
         "frameworks": cards,
+        "sequence": _step_sequence(data, k, slot),
+        "logs": [line for line in shaped["logs"] if line["k"] == k],
         "kills": kills,
         "note": note,
         "budget_gpu_h": slot["budget_gpu_h"],

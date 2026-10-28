@@ -10,6 +10,9 @@ venv/
 .env
 .env.*
 
+# Local lab notes. Server details stay on this machine.
+/AGENT_GPU_GUIDE.md
+
 # OS / editor
 .DS_Store
 

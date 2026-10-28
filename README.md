@@ -1,6 +1,6 @@
 # ARF_prime
 
-Self-referential two-level research agent. The binding spec is [`methodology.md`](methodology.md). Choices already made are in [`report_experiment/`](report_experiment/README.md). The core, the agents, and the real vault are not built yet. The control room and the D0 room are local viewers over synthetic logs until those exist.
+Self-referential two-level research agent. The binding spec is [`methodology.md`](methodology.md). Choices already made are in [`report_experiment/decision_log.md`](report_experiment/decision_log.md). The core, the agents, and the real vault are not built yet. The control room and the D0 room are local viewers over synthetic logs until those exist.
 
 ## Open the rooms
 

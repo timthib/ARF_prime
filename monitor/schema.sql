@@ -53,6 +53,7 @@ CREATE TABLE meta_step (
     tamper_reason TEXT,
     parent_framework_id TEXT,
     edit_json TEXT,
+    l0_thinking TEXT,
     UNIQUE (meta_run_id, k)
 );
 
@@ -110,6 +111,7 @@ CREATE TABLE model (
     branch_id TEXT,
     parent_model_id TEXT,
     operator TEXT,
+    family TEXT,
     seed INTEGER NOT NULL,
     b_created REAL NOT NULL,
     u REAL,
@@ -117,7 +119,8 @@ CREATE TABLE model (
     artifact_path TEXT,
     artifact_sha256 TEXT,
     is_ideal_model INTEGER NOT NULL DEFAULT 0,
-    seq INTEGER NOT NULL
+    seq INTEGER NOT NULL,
+    thinking TEXT
 );
 
 CREATE TABLE eval_event (

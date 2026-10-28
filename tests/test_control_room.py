@@ -52,6 +52,50 @@ def test_demo_meta_loop_has_past_live_and_future(tmp_path):
     assert carried["curve"][-1]["b"] == pytest.approx(0.25)
 
 
+def test_framework_cards_expose_the_decision_record(tmp_path):
+    build_demo(tmp_path)
+    data = find_run(tmp_path, "loop-arm6-r1")
+    run = shape_run(data)
+    leader = next(card for card in run["cards"] if card["leading"])
+    assert leader["framework_id"] == "v5"
+    assert leader["j_sel"] is not None
+    assert leader["n_models"] == 15
+    assert leader["best_u"] is not None
+    assert run["incumbent_check"]["elected_framework_id"] == "v5"
+    assert any(note["level"] == "bad" for note in run["attention"])
+    framework = shape_framework(data, "v5")
+    assert framework["j_sel_median"] == leader["j_sel"]
+    seed = next(item for item in framework["seeds"] if item["seed"] == 101)
+    assert seed["models"][0]["family"] == "ridge"
+    assert [point["model_id"].rsplit("-", 1)[-1] for point in seed["best_u"]] == ["m1", "m3", "m4", "m5"]
+    step = shape_step(data, 5)
+    assert step["frameworks"][0]["framework_id"] == "v5"
+    assert step["sequence"][0]["state"] == "done"
+
+
+def test_overfit_is_u_up_and_s_sel_down(tmp_path):
+    build_demo(tmp_path)
+    data = find_run(tmp_path, "loop-arm6-r1")
+    framework = shape_framework(data, "v5")
+    seed = next(item for item in framework["seeds"] if item["seed"] == 101)
+    assert [model["label"] for model in seed["models"]] == ["model1", "model2", "model3", "model4", "model5"]
+    assert seed["overfit"]["n_overfit"] == 1
+    event = next(item for item in seed["overfit"]["events"] if item["overfit"])
+    assert event["from_label"] == "model1"
+    assert event["to_label"] == "model3"
+    assert event["du"] > 0
+    assert event["ds"] < 0
+    assert seed["models"][2]["overfit"] is True
+    assert "beats incumbent model1" in seed["models"][2]["thinking"]["why"]
+    step = shape_step(data, 5)
+    assert step["l0_thinking"]["what"]
+    assert step["l0_thinking"]["how"]
+    assert step["l0_thinking"]["why"]
+    assert step["frameworks"][0]["model_seeds"][0]["models"][0]["label"] == "model1"
+    rejected = shape_step(data, 3)
+    assert "budget counter" in rejected["l0_thinking"]["what"]
+
+
 def test_pilot_curve_matches_the_stored_rule(tmp_path):
     build_demo(tmp_path)
     pilot = shape_run(find_run(tmp_path, "pilot-arm6-r1"))
